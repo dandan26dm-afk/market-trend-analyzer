@@ -218,7 +218,15 @@ def fetch_ticker_row(ticker: str) -> dict:
         status = rsi_status(rsi_value)
 
         # --- 52-week trading range -------------------------------------------
-        lookback = hist.last("365D") if len(hist) > 0 else hist
+        # NOTE: DataFrame.last() was removed in newer pandas versions, so we
+        # filter by date using the index directly instead.
+        if len(hist.index) > 0:
+            cutoff = hist.index.max() - pd.Timedelta(days=365)
+            lookback = hist[hist.index >= cutoff]
+            if lookback.empty:
+                lookback = hist
+        else:
+            lookback = hist
         try:
             high_col = safe_get_column(lookback, "High", fallback="Close")
         except KeyError:

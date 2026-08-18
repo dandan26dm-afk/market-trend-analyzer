@@ -361,19 +361,33 @@ def trend_color(trend):
     return f"background-color: {color}; color: #222; font-weight: 600;"
 
 
+def styler_apply_cellwise(styler, func, **kwargs):
+    """
+    Apply a cell-wise style function on a pandas Styler in a way that works
+    across pandas versions:
+      - pandas >= 2.1.0: Styler.map (Styler.applymap was removed)
+      - pandas <  2.1.0: Styler.applymap (Styler.map didn't exist yet)
+    """
+    if hasattr(styler, "map"):
+        return styler.map(func, **kwargs)
+    return styler.applymap(func, **kwargs)
+
+
 def style_dataframe(df: pd.DataFrame):
     display_df = df[
         ["Price", "YTD %", "5-Day %", "50-DMA %", "Trend", "RSI (14)", "Status", "52W Low", "52W High"]
     ].copy()
 
+    styler = display_df.style
+    styler = styler_apply_cellwise(styler, pct_gradient_color, subset=["YTD %"], vmin=-20, vmax=20)
+    styler = styler_apply_cellwise(styler, pct_gradient_color, subset=["5-Day %"], vmin=-5, vmax=5)
+    styler = styler_apply_cellwise(styler, pct_gradient_color, subset=["50-DMA %"], vmin=-10, vmax=10)
+    styler = styler_apply_cellwise(styler, rsi_gradient_color, subset=["RSI (14)"])
+    styler = styler_apply_cellwise(styler, status_color, subset=["Status"])
+    styler = styler_apply_cellwise(styler, trend_color, subset=["Trend"])
+
     styler = (
-        display_df.style
-        .applymap(pct_gradient_color, subset=["YTD %"], vmin=-20, vmax=20)
-        .applymap(pct_gradient_color, subset=["5-Day %"], vmin=-5, vmax=5)
-        .applymap(pct_gradient_color, subset=["50-DMA %"], vmin=-10, vmax=10)
-        .applymap(rsi_gradient_color, subset=["RSI (14)"])
-        .applymap(status_color, subset=["Status"])
-        .applymap(trend_color, subset=["Trend"])
+        styler
         .format(
             {
                 "Price": "${:,.2f}",

@@ -16,9 +16,11 @@ Deploy on Streamlit Cloud:
 """
 
 import datetime as dt
+import time
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -32,6 +34,31 @@ st.set_page_config(
     page_icon="📈",
     layout="wide",
 )
+
+# --------------------------------------------------------------------------
+# Yahoo Finance session
+# --------------------------------------------------------------------------
+# Streamlit Cloud servers sometimes get blocked / rate-limited by Yahoo
+# Finance because requests arrive without a "normal" browser User-Agent.
+# Building a dedicated requests.Session with a browser-like User-Agent (and
+# reusing it across all tickers) significantly reduces connection failures.
+def build_yf_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+    )
+    return session
+
+
+YF_SESSION = build_yf_session()
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -67,27 +94,97 @@ def rsi_status(rsi_value: float) -> str:
     return "Neutral"
 
 
+def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize a yfinance history DataFrame so it always has plain,
+    single-level columns (Open/High/Low/Close/Adj Close/Volume), even if
+    yfinance returned a MultiIndex (which can happen depending on the
+    yfinance version / endpoint, even for a single ticker).
+    """
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df
+
+    field_level = None
+    for level in range(df.columns.nlevels):
+        values = set(df.columns.get_level_values(level))
+        if {"Close", "Open", "High", "Low", "Adj Close"} & values:
+            field_level = level
+            break
+
+    flat = df.copy()
+    flat.columns = flat.columns.get_level_values(
+        field_level if field_level is not None else 0
+    )
+    # If flattening produced duplicate column names, keep the first occurrence
+    flat = flat.loc[:, ~flat.columns.duplicated()]
+    return flat
+
+
+def safe_get_column(df: pd.DataFrame, primary: str, fallback: str = None) -> pd.Series:
+    """
+    Safely extract a single column as a Series, trying `primary` first and
+    then `fallback` (e.g. 'Close' -> 'Adj Close'). Raises KeyError if
+    neither is available.
+    """
+    for name in (primary, fallback):
+        if name and name in df.columns:
+            col = df[name]
+            if isinstance(col, pd.DataFrame):  # duplicate labels edge case
+                col = col.iloc[:, 0]
+            return col.dropna()
+    raise KeyError(f"Neither '{primary}' nor '{fallback}' found in downloaded data.")
+
+
+def fetch_history_with_retry(ticker: str, retries: int = 3, delay: float = 1.5) -> pd.DataFrame:
+    """
+    Fetch daily history for a single ticker using yf.Ticker(...).history(),
+    with a small retry loop to smooth over transient Yahoo Finance /
+    cloud-network hiccups (timeouts, empty responses, rate limits, etc.)
+    """
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            tk = yf.Ticker(ticker, session=YF_SESSION)
+            hist = tk.history(
+                period="18mo",
+                interval="1d",
+                auto_adjust=False,
+                actions=False,
+                timeout=15,
+            )
+            if hist is not None and not hist.empty:
+                return hist
+            last_exc = ValueError("Empty response from Yahoo Finance.")
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+        if attempt < retries:
+            time.sleep(delay * attempt)  # simple backoff
+
+    # All retries failed - raise the last seen exception so the caller
+    # can record a clean error message for this specific ticker.
+    raise last_exc if last_exc else RuntimeError("Unknown error fetching history.")
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ticker_row(ticker: str) -> dict:
     """
-    Pull ~1.5y of daily data for a ticker and compute all the metrics.
+    Pull ~18 months of daily data for a ticker and compute all the metrics.
+    Each ticker is fetched independently (its own try/except) so that a
+    failure on one symbol never blocks the others.
     Returns a dict with an 'error' key set if something went wrong
-    (e.g. no data available, non-trading day, network issue, etc.)
+    (e.g. no data available, non-trading day, network/Yahoo issue, etc.)
     """
     row = {"Ticker": ticker, "error": None}
     try:
-        hist = yf.Ticker(ticker).history(period="18mo", interval="1d", auto_adjust=False)
+        hist = fetch_history_with_retry(ticker)
+        hist = flatten_columns(hist)
 
-        if hist is None or hist.empty:
-            row["error"] = "No data returned (market closed / ticker issue)."
-            return row
-
-        hist = hist.dropna(subset=["Close"])
-        if hist.empty:
+        close = safe_get_column(hist, "Close", fallback="Adj Close")
+        if close.empty:
             row["error"] = "No valid close prices found."
             return row
 
-        close = hist["Close"]
         price = float(close.iloc[-1])
 
         # --- 5-Day % change ---------------------------------------------
@@ -122,8 +219,14 @@ def fetch_ticker_row(ticker: str) -> dict:
 
         # --- 52-week trading range -------------------------------------------
         lookback = hist.last("365D") if len(hist) > 0 else hist
-        high_col = lookback["High"] if "High" in lookback else lookback["Close"]
-        low_col = lookback["Low"] if "Low" in lookback else lookback["Close"]
+        try:
+            high_col = safe_get_column(lookback, "High", fallback="Close")
+        except KeyError:
+            high_col = close
+        try:
+            low_col = safe_get_column(lookback, "Low", fallback="Close")
+        except KeyError:
+            low_col = close
         high_52 = float(high_col.max())
         low_52 = float(low_col.min())
 
@@ -152,7 +255,7 @@ def fetch_ticker_row(ticker: str) -> dict:
         return row
 
     except Exception as exc:  # noqa: BLE001 - want to surface any failure gracefully
-        row["error"] = f"Error fetching data: {exc}"
+        row["error"] = f"Error fetching data ({type(exc).__name__}): {exc}"
         return row
 
 

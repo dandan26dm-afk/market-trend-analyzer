@@ -27,7 +27,12 @@ import yfinance as yf
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
-TICKERS = ["SPY", "QQQ", "RSP", "IWM"]
+INDEX_TICKERS = ["SPY", "QQQ", "RSP", "IWM"]
+SECTOR_ETF_TICKERS = [
+    "XLE", "XLI", "XLF", "XLV", "XLP",
+    "XLC", "XLB", "XLK", "XLY", "XLRE", "XLU",
+]
+TICKERS = INDEX_TICKERS + SECTOR_ETF_TICKERS
 
 st.set_page_config(
     page_title="Trend Analyzer",
@@ -287,6 +292,14 @@ def fetch_ticker_row(ticker: str) -> dict:
         return row
 
 
+def ticker_category(ticker: str) -> str:
+    if ticker in INDEX_TICKERS:
+        return "Index"
+    if ticker in SECTOR_ETF_TICKERS:
+        return "Sector ETF"
+    return "Other"
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
     rows = []
@@ -299,6 +312,7 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
             rows.append(
                 {
                     "Ticker": t,
+                    "Category": ticker_category(t),
                     "Price": np.nan,
                     "YTD %": np.nan,
                     "5-Day %": np.nan,
@@ -314,6 +328,7 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
             )
         else:
             r.pop("error", None)
+            r["Category"] = ticker_category(t)
             rows.append(r)
 
     df = pd.DataFrame(rows).set_index("Ticker")
@@ -423,7 +438,7 @@ def styler_apply_cellwise(styler, func, **kwargs):
 def style_dataframe(df: pd.DataFrame):
     display_df = df[
         [
-            "Price", "YTD %", "5-Day %", "50-DMA %", "Trend",
+            "Category", "Price", "YTD %", "5-Day %", "50-DMA %", "Trend",
             "RSI (14)", "Status", "Timing", "52W Low", "52W High",
         ]
     ].copy()
@@ -463,8 +478,10 @@ def style_dataframe(df: pd.DataFrame):
 # --------------------------------------------------------------------------
 st.title("📈 Trend Analyzer")
 st.caption(
-    "Tracking " + ", ".join(f"**{t}**" for t in TICKERS)
-    + " — price trend, momentum, and overbought/oversold status."
+    f"Tracking {len(INDEX_TICKERS)} major indices "
+    f"({', '.join(INDEX_TICKERS)}) and {len(SECTOR_ETF_TICKERS)} sector ETFs "
+    f"({', '.join(SECTOR_ETF_TICKERS)}) — "
+    "price trend, momentum, and overbought/oversold status."
 )
 
 col_a, col_b = st.columns([1, 5])
@@ -472,7 +489,7 @@ with col_a:
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
 
-with st.spinner("Fetching market data..."):
+with st.spinner(f"Fetching market data for {len(TICKERS)} tickers..."):
     df, errors = build_dataframe(TICKERS)
 
 if errors:

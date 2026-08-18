@@ -94,6 +94,23 @@ def rsi_status(rsi_value: float) -> str:
     return "Neutral"
 
 
+def compute_timing(dma50_pct: float, five_day_pct: float) -> str:
+    """
+    Simple momentum-based entry-timing read:
+      - Good:    medium-term trend (50-DMA %) AND short-term momentum
+                 (5-Day %) both positive -> aligned, favorable momentum.
+      - Poor:    both negative -> aligned, unfavorable momentum.
+      - Neutral: mixed / conflicting signals, or missing data.
+    """
+    if pd.isna(dma50_pct) or pd.isna(five_day_pct):
+        return "N/A"
+    if dma50_pct >= 0 and five_day_pct >= 0:
+        return "Good"
+    if dma50_pct < 0 and five_day_pct < 0:
+        return "Poor"
+    return "Neutral"
+
+
 def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize a yfinance history DataFrame so it always has plain,
@@ -244,6 +261,8 @@ def fetch_ticker_row(ticker: str) -> dict:
         else:
             position_52w = np.nan
 
+        timing = compute_timing(dma50_pct, five_day_pct)
+
         row.update(
             {
                 "Price": round(price, 2),
@@ -255,6 +274,7 @@ def fetch_ticker_row(ticker: str) -> dict:
                 ),
                 "RSI (14)": round(rsi_value, 1) if not pd.isna(rsi_value) else np.nan,
                 "Status": status,
+                "Timing": timing,
                 "52W Low": round(low_52, 2),
                 "52W High": round(high_52, 2),
                 "52W Position": position_52w,  # 0..1, used for progress bar
@@ -286,6 +306,7 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
                     "Trend": "N/A",
                     "RSI (14)": np.nan,
                     "Status": "N/A",
+                    "Timing": "N/A",
                     "52W Low": np.nan,
                     "52W High": np.nan,
                     "52W Position": np.nan,
@@ -302,19 +323,35 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
 # --------------------------------------------------------------------------
 # Styling
 # --------------------------------------------------------------------------
-STATUS_COLORS = {
-    "Extreme OB": "#ff4d4d",   # strong red - dangerously overbought
-    "Overbought": "#ffb347",   # orange - caution
-    "Neutral": "#fff59d",      # yellow - neutral
-    "Oversold": "#a8e6a1",     # light green - potential opportunity
-    "Extreme OS": "#3ecf5f",   # strong green - deeply oversold
-    "N/A": "#e0e0e0",
+# Each entry: status -> (background color, text color)
+STATUS_STYLE = {
+    "Extreme OB": ("#ff4c4c", "#ffffff"),  # strong red, white text
+    "Overbought": ("#ffb3b3", "#000000"),  # light red/pink, black text
+    "Neutral":    ("#ffffff", "#000000"),  # white, black text
+    "Oversold":   ("#b3ffb3", "#000000"),  # light green, black text
+    "Extreme OS": ("#33cc33", "#ffffff"),  # strong green, white text
+    "N/A":        ("#e0e0e0", "#666666"),
 }
 
-TREND_COLORS = {
-    "Bullish": "#3ecf5f",
-    "Bearish": "#ff4d4d",
-    "N/A": "#e0e0e0",
+# Timing (momentum-based) -> (background color, text color)
+TIMING_STYLE = {
+    "Good":    ("#33cc33", "#ffffff"),  # green, white text
+    "Neutral": ("#ffb347", "#000000"),  # orange, black text
+    "Poor":    ("#ff4c4c", "#ffffff"),  # red, white text
+    "N/A":     ("#e0e0e0", "#666666"),
+}
+
+# Trend is now shown as a colored arrow icon only (no background fill)
+TREND_ARROWS = {
+    "Bullish": "▲",
+    "Bearish": "▼",
+    "N/A": "–",
+}
+
+TREND_TEXT_COLORS = {
+    "Bullish": "#2ecc71",  # green
+    "Bearish": "#ff4c4c",  # red
+    "N/A": "#999999",
 }
 
 
@@ -345,20 +382,30 @@ def pct_gradient_color(val, vmin=-10, vmax=10):
 
 def rsi_gradient_color(val):
     if pd.isna(val):
-        return "background-color: #e0e0e0; color: #666;"
-    status = rsi_status(val)
-    color = STATUS_COLORS.get(status, "#e0e0e0")
-    return f"background-color: {color}; color: #222;"
+        bg, fg = STATUS_STYLE["N/A"]
+    else:
+        status = rsi_status(val)
+        bg, fg = STATUS_STYLE.get(status, STATUS_STYLE["N/A"])
+    return f"background-color: {bg}; color: {fg}; font-weight: 600;"
 
 
 def status_color(status):
-    color = STATUS_COLORS.get(status, "#e0e0e0")
-    return f"background-color: {color}; color: #222; font-weight: 600;"
+    bg, fg = STATUS_STYLE.get(status, STATUS_STYLE["N/A"])
+    return f"background-color: {bg}; color: {fg}; font-weight: 600;"
+
+
+def timing_color(timing):
+    bg, fg = TIMING_STYLE.get(timing, TIMING_STYLE["N/A"])
+    return f"background-color: {bg}; color: {fg}; font-weight: 600;"
 
 
 def trend_color(trend):
-    color = TREND_COLORS.get(trend, "#e0e0e0")
-    return f"background-color: {color}; color: #222; font-weight: 600;"
+    """Trend cells show only a colored arrow icon - no background fill."""
+    color = TREND_TEXT_COLORS.get(trend, TREND_TEXT_COLORS["N/A"])
+    return (
+        f"color: {color}; background-color: transparent; "
+        "font-weight: 700; font-size: 18px; text-align: center;"
+    )
 
 
 def styler_apply_cellwise(styler, func, **kwargs):
@@ -375,7 +422,10 @@ def styler_apply_cellwise(styler, func, **kwargs):
 
 def style_dataframe(df: pd.DataFrame):
     display_df = df[
-        ["Price", "YTD %", "5-Day %", "50-DMA %", "Trend", "RSI (14)", "Status", "52W Low", "52W High"]
+        [
+            "Price", "YTD %", "5-Day %", "50-DMA %", "Trend",
+            "RSI (14)", "Status", "Timing", "52W Low", "52W High",
+        ]
     ].copy()
 
     styler = display_df.style
@@ -384,6 +434,7 @@ def style_dataframe(df: pd.DataFrame):
     styler = styler_apply_cellwise(styler, pct_gradient_color, subset=["50-DMA %"], vmin=-10, vmax=10)
     styler = styler_apply_cellwise(styler, rsi_gradient_color, subset=["RSI (14)"])
     styler = styler_apply_cellwise(styler, status_color, subset=["Status"])
+    styler = styler_apply_cellwise(styler, timing_color, subset=["Timing"])
     styler = styler_apply_cellwise(styler, trend_color, subset=["Trend"])
 
     styler = (
@@ -397,6 +448,9 @@ def style_dataframe(df: pd.DataFrame):
                 "RSI (14)": "{:.1f}",
                 "52W Low": "${:,.2f}",
                 "52W High": "${:,.2f}",
+                # Trend's underlying value stays "Bullish"/"Bearish"/"N/A"
+                # for styling purposes; only the displayed text becomes an arrow.
+                "Trend": lambda v: TREND_ARROWS.get(v, "–"),
             },
             na_rep="N/A",
         )
@@ -457,10 +511,12 @@ else:
     )
 
     st.caption(
-        "Trend = Bullish (green) when price is at/above the 50-day moving average, "
-        "Bearish (red) when below. "
-        "Status is derived from RSI(14): Extreme OB ≥ 80, Overbought ≥ 70, "
-        "Neutral 30-70, Oversold ≤ 30, Extreme OS ≤ 20."
+        "Trend: ▲ green = price at/above the 50-day moving average, "
+        "▼ red = price below it. "
+        "Status (RSI 14): Extreme OB ≥ 80, Overbought ≥ 70, Neutral 30-70, "
+        "Oversold ≤ 30, Extreme OS ≤ 20. "
+        "Timing: Good = 50-DMA % and 5-Day % both positive, "
+        "Poor = both negative, Neutral = mixed signals."
     )
 
     st.caption(f"Last updated: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

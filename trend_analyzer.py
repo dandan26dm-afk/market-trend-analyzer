@@ -27,12 +27,35 @@ import yfinance as yf
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
-INDEX_TICKERS = ["SPY", "QQQ", "RSP", "IWM"]
+INDEX_TICKERS = ["SPY", "QQQ", "RSP", "IWM", "VOO"]
 SECTOR_ETF_TICKERS = [
     "XLE", "XLI", "XLF", "XLV", "XLP",
     "XLC", "XLB", "XLK", "XLY", "XLRE", "XLU",
+    "IGV", "SOXX",
 ]
 TICKERS = INDEX_TICKERS + SECTOR_ETF_TICKERS
+
+# Human-readable name / description for each ticker, shown in the "Name" column.
+TICKER_NAMES = {
+    "SPY": "מדד S&P 500 (משקל שוק)",
+    "QQQ": "מדד הנאסד\"ק 100",
+    "RSP": "מדד S&P 500 (משקל שווה)",
+    "IWM": "מדד ראסל 2000 (Small Cap)",
+    "VOO": "מדד S&P 500 (Vanguard)",
+    "IGV": "סקטור התוכנה",
+    "SOXX": "סקטור השבבים והמוליכים למחצה",
+    "XLE": "סקטור האנרגיה",
+    "XLI": "סקטור התעשייה",
+    "XLF": "סקטור הפיננסים",
+    "XLV": "סקטור הבריאות",
+    "XLP": "סקטור צריכה בסיסית",
+    "XLC": "סקטור התקשורת והמדיה",
+    "XLB": "סקטור חומרי גלם",
+    "XLK": "סקטור הטכנולוגיה",
+    "XLY": "סקטור צריכה מחזורית",
+    "XLRE": "סקטור הנדל\"ן",
+    "XLU": "סקטור התשתיות",
+}
 
 st.set_page_config(
     page_title="Trend Analyzer",
@@ -342,6 +365,10 @@ def ticker_category(ticker: str) -> str:
     return "Other"
 
 
+def ticker_name(ticker: str) -> str:
+    return TICKER_NAMES.get(ticker, ticker)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
     rows = []
@@ -355,6 +382,7 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
                 {
                     "Ticker": t,
                     "Category": ticker_category(t),
+                    "Name": ticker_name(t),
                     "Price": np.nan,
                     "YTD %": np.nan,
                     "5-Day %": np.nan,
@@ -372,6 +400,7 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
         else:
             r.pop("error", None)
             r["Category"] = ticker_category(t)
+            r["Name"] = ticker_name(t)
             rows.append(r)
 
     df = pd.DataFrame(rows).set_index("Ticker")
@@ -491,7 +520,7 @@ def styler_apply_cellwise(styler, func, **kwargs):
 def style_dataframe(df: pd.DataFrame):
     display_df = df[
         [
-            "Category", "Price", "YTD %", "5-Day %", "50-DMA %", "Trend",
+            "Category", "Name", "Price", "YTD %", "5-Day %", "50-DMA %", "Trend",
             "RSI (14)", "Z-Score", "Status", "Timing", "52W Low", "52W High",
         ]
     ].copy()
@@ -561,13 +590,17 @@ if df.empty or df["Price"].isna().all():
 else:
     st.subheader("Overview")
     styled = style_dataframe(df)
-    st.dataframe(styled, use_container_width=True)
+    # Dynamic height so all rows are visible at once, with no internal
+    # vertical scrollbar (row height ~35px + header + small padding).
+    table_height = (len(df) + 1) * 35 + 3
+    st.dataframe(styled, use_container_width=True, height=table_height)
 
     st.subheader("52-Week Trading Range")
     range_df = df[["52W Low", "Price", "52W High", "52W Position"]].copy()
     st.dataframe(
         range_df,
         use_container_width=True,
+        height=table_height,
         column_config={
             "52W Low": st.column_config.NumberColumn("52W Low", format="$%.2f"),
             "Price": st.column_config.NumberColumn("Price", format="$%.2f"),

@@ -5,7 +5,7 @@ on:
   # NYSE close is 20:00 UTC during EDT / 21:00 UTC during EST - adjust the
   # cron below if you want it pinned to a specific local close time).
   schedule:
-    - cron: "0 21 * * 1-5"
+    - cron: "0 05 * * 1-5"
   # Allows triggering the workflow manually from the Actions tab.
   workflow_dispatch: {}
 

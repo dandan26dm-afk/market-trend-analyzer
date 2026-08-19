@@ -85,7 +85,13 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
-def rsi_status(rsi_value: float) -> str:
+def rsi_level(rsi_value: float) -> str:
+    """
+    Classify a raw RSI(14) value into the same label set used elsewhere,
+    purely for coloring the RSI column itself. This is independent of the
+    main 'Status' column, which is now based on 50-DMA standard-deviation
+    bands (see `zscore_status` below), not RSI.
+    """
     if pd.isna(rsi_value):
         return "N/A"
     if rsi_value >= 80:
@@ -99,21 +105,45 @@ def rsi_status(rsi_value: float) -> str:
     return "Neutral"
 
 
-def compute_timing(dma50_pct: float, five_day_pct: float) -> str:
+def zscore_status(z: float) -> str:
     """
-    Simple momentum-based entry-timing read:
-      - Good:    medium-term trend (50-DMA %) AND short-term momentum
-                 (5-Day %) both positive -> aligned, favorable momentum.
-      - Poor:    both negative -> aligned, unfavorable momentum.
-      - Neutral: mixed / conflicting signals, or missing data.
+    Bespoke-style 50-DMA standard-deviation band classification:
+      Z = (Price - SMA_50) / STD_50
+        Z >= 2.0            -> Extreme OB
+        1.0 <= Z < 2.0       -> Overbought
+        -1.0 < Z < 1.0       -> Neutral
+        -2.0 < Z <= -1.0     -> Oversold
+        Z <= -2.0            -> Extreme OS
     """
-    if pd.isna(dma50_pct) or pd.isna(five_day_pct):
+    if pd.isna(z):
         return "N/A"
-    if dma50_pct >= 0 and five_day_pct >= 0:
-        return "Good"
-    if dma50_pct < 0 and five_day_pct < 0:
-        return "Poor"
+    if z >= 2.0:
+        return "Extreme OB"
+    if z >= 1.0:
+        return "Overbought"
+    if z <= -2.0:
+        return "Extreme OS"
+    if z <= -1.0:
+        return "Oversold"
     return "Neutral"
+
+
+def timing_from_status(status: str) -> str:
+    """
+    Timing is now derived directly from the Status (Z-score) reading:
+      Extreme OB / Overbought -> Poor   (stretched to the upside, caution)
+      Neutral                 -> Neutral
+      Oversold / Extreme OS   -> Good   (stretched to the downside, opportunity)
+    """
+    mapping = {
+        "Extreme OB": "Poor",
+        "Overbought": "Poor",
+        "Neutral": "Neutral",
+        "Oversold": "Good",
+        "Extreme OS": "Good",
+        "N/A": "N/A",
+    }
+    return mapping.get(status, "N/A")
 
 
 def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -226,18 +256,29 @@ def fetch_ticker_row(ticker: str) -> dict:
         else:
             ytd_pct = np.nan
 
-        # --- 50-Day Moving Average -----------------------------------------
+        # --- 50-Day Moving Average & Standard Deviation ---------------------
         if len(close) >= 50:
             sma50 = float(close.rolling(window=50).mean().iloc[-1])
+            std50 = float(close.rolling(window=50).std().iloc[-1])
             dma50_pct = (price / sma50 - 1) * 100
         else:
             sma50 = np.nan
+            std50 = np.nan
             dma50_pct = np.nan
 
+        # --- 50-DMA Standard-Deviation Z-Score (Bespoke-style) ---------------
+        # Z = (Price - SMA_50) / STD_50
+        if not pd.isna(sma50) and not pd.isna(std50) and std50 > 0:
+            zscore = (price - sma50) / std50
+        else:
+            zscore = np.nan
+        status = zscore_status(zscore)
+
         # --- RSI (14) --------------------------------------------------------
+        # Still computed and shown as its own column, but no longer drives
+        # the main 'Status' classification (that's now Z-score based above).
         rsi_series = compute_rsi(close, period=14)
         rsi_value = float(rsi_series.iloc[-1]) if not rsi_series.empty else np.nan
-        status = rsi_status(rsi_value)
 
         # --- 52-week trading range -------------------------------------------
         # NOTE: DataFrame.last() was removed in newer pandas versions, so we
@@ -266,7 +307,7 @@ def fetch_ticker_row(ticker: str) -> dict:
         else:
             position_52w = np.nan
 
-        timing = compute_timing(dma50_pct, five_day_pct)
+        timing = timing_from_status(status)
 
         row.update(
             {
@@ -278,6 +319,7 @@ def fetch_ticker_row(ticker: str) -> dict:
                     "Bearish" if not pd.isna(dma50_pct) else "N/A"
                 ),
                 "RSI (14)": round(rsi_value, 1) if not pd.isna(rsi_value) else np.nan,
+                "Z-Score": round(zscore, 2) if not pd.isna(zscore) else np.nan,
                 "Status": status,
                 "Timing": timing,
                 "52W Low": round(low_52, 2),
@@ -319,6 +361,7 @@ def build_dataframe(tickers: list[str]) -> tuple[pd.DataFrame, list[str]]:
                     "50-DMA %": np.nan,
                     "Trend": "N/A",
                     "RSI (14)": np.nan,
+                    "Z-Score": np.nan,
                     "Status": "N/A",
                     "Timing": "N/A",
                     "52W Low": np.nan,
@@ -399,8 +442,18 @@ def rsi_gradient_color(val):
     if pd.isna(val):
         bg, fg = STATUS_STYLE["N/A"]
     else:
-        status = rsi_status(val)
-        bg, fg = STATUS_STYLE.get(status, STATUS_STYLE["N/A"])
+        level = rsi_level(val)
+        bg, fg = STATUS_STYLE.get(level, STATUS_STYLE["N/A"])
+    return f"background-color: {bg}; color: {fg}; font-weight: 600;"
+
+
+def zscore_gradient_color(val):
+    """Color the Z-Score column using the same band thresholds as Status."""
+    if pd.isna(val):
+        bg, fg = STATUS_STYLE["N/A"]
+    else:
+        level = zscore_status(val)
+        bg, fg = STATUS_STYLE.get(level, STATUS_STYLE["N/A"])
     return f"background-color: {bg}; color: {fg}; font-weight: 600;"
 
 
@@ -439,7 +492,7 @@ def style_dataframe(df: pd.DataFrame):
     display_df = df[
         [
             "Category", "Price", "YTD %", "5-Day %", "50-DMA %", "Trend",
-            "RSI (14)", "Status", "Timing", "52W Low", "52W High",
+            "RSI (14)", "Z-Score", "Status", "Timing", "52W Low", "52W High",
         ]
     ].copy()
 
@@ -448,6 +501,7 @@ def style_dataframe(df: pd.DataFrame):
     styler = styler_apply_cellwise(styler, pct_gradient_color, subset=["5-Day %"], vmin=-5, vmax=5)
     styler = styler_apply_cellwise(styler, pct_gradient_color, subset=["50-DMA %"], vmin=-10, vmax=10)
     styler = styler_apply_cellwise(styler, rsi_gradient_color, subset=["RSI (14)"])
+    styler = styler_apply_cellwise(styler, zscore_gradient_color, subset=["Z-Score"])
     styler = styler_apply_cellwise(styler, status_color, subset=["Status"])
     styler = styler_apply_cellwise(styler, timing_color, subset=["Timing"])
     styler = styler_apply_cellwise(styler, trend_color, subset=["Trend"])
@@ -461,6 +515,7 @@ def style_dataframe(df: pd.DataFrame):
                 "5-Day %": "{:+.2f}%",
                 "50-DMA %": "{:+.2f}%",
                 "RSI (14)": "{:.1f}",
+                "Z-Score": "{:+.2f}",
                 "52W Low": "${:,.2f}",
                 "52W High": "${:,.2f}",
                 # Trend's underlying value stays "Bullish"/"Bearish"/"N/A"
@@ -530,10 +585,13 @@ else:
     st.caption(
         "Trend: ▲ green = price at/above the 50-day moving average, "
         "▼ red = price below it. "
-        "Status (RSI 14): Extreme OB ≥ 80, Overbought ≥ 70, Neutral 30-70, "
-        "Oversold ≤ 30, Extreme OS ≤ 20. "
-        "Timing: Good = 50-DMA % and 5-Day % both positive, "
-        "Poor = both negative, Neutral = mixed signals."
+        "Status (Bespoke-style 50-DMA bands): Z = (Price − SMA50) / STD50 — "
+        "Extreme OB ≥ 2.0, Overbought 1.0–2.0, Neutral −1.0 to 1.0, "
+        "Oversold −2.0 to −1.0, Extreme OS ≤ −2.0. "
+        "Timing follows Status directly: Extreme OB/Overbought → Poor, "
+        "Neutral → Neutral, Oversold/Extreme OS → Good. "
+        "RSI (14) is shown separately as an additional momentum reference "
+        "and is not used to compute Status or Timing."
     )
 
     st.caption(f"Last updated: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
